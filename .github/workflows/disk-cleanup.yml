@@ -1,0 +1,66 @@
+#
+# 可复用工作流：磁盘空间清理
+# 被 build.yml 调用，可通过参数控制是否启用
+#
+
+name: "🧹 Disk Cleanup"
+
+on:
+  workflow_call:
+    inputs:
+      enabled:
+        description: "是否启用磁盘清理"
+        type: boolean
+        default: true
+        required: false
+
+jobs:
+  cleanup:
+    if: inputs.enabled == true
+    runs-on: ubuntu-latest
+    name: "🧹 清理磁盘空间"
+
+    steps:
+      - name: "📊 磁盘空间 (Before)"
+        run: |
+          echo "============================== BEFORE =============================="
+          df -hT
+          echo "===================================================================="
+
+      - name: "🧹 深度清理磁盘空间"
+        uses: hugoalh/disk-space-optimizer-ghaction@v0.8.1
+        with:
+          operate_sudo: "True"
+          general_include: ".+"
+          general_exclude: |-
+            ^GCC$
+            ^G\+\+$
+            Clang
+            LLVM
+          docker_include: ".+"
+          docker_prune: "True"
+          docker_clean: "True"
+          apt_prune: "True"
+          apt_clean: "True"
+          homebrew_prune: "True"
+          homebrew_clean: "True"
+          npm_prune: "True"
+          npm_clean: "True"
+          os_swap: "True"
+
+      - name: "📦 最大化构建空间"
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 3072
+          swap-size-mb: 1
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          remove-docker-images: "true"
+
+      - name: "📊 磁盘空间 (After)"
+        run: |
+          echo "============================== AFTER ==============================="
+          df -hT
+          echo "===================================================================="

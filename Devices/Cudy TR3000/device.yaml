@@ -1,0 +1,14 @@
+# Cudy TR3000 设备配置
+# 此文件定义设备相关的编译参数，由 build.yml 读取
+
+# 设备型号（用于固件命名）
+model: "Cudy TR3000"
+
+# 固件输出目录（相对于 immortalwrt 源码根目录）
+firmware_dir: "bin/targets/mediatek/filogic"
+
+# 自定义软件包列表文件
+packages_list: "packages.yaml"
+
+# 设备 TARGET（用于 make defconfig）
+target: "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-v1-ubootmod=y"

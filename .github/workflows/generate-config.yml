@@ -1,0 +1,302 @@
+#
+# 生成设备默认编译配置
+# 根据设备的 CONFIG_TARGET_* 选项生成所有版本的默认配置
+# 并与 default.config 对比差异
+#
+
+name: "Generate Device Config"
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "目标设备"
+        type: choice
+        options:
+          - "Cudy TR3000"
+        default: "Cudy TR3000"
+        required: true
+      tag:
+        description: "ImmortalWrt 版本标签"
+        type: choice
+        options:
+          - latest
+          - v25.12.1
+          - v25.12.0
+          - v24.10.6
+          - v24.10.5
+        default: latest
+        required: true
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  generate-config:
+    runs-on: ubuntu-latest
+    name: "生成设备默认配置"
+
+    steps:
+      # ===========================================================
+      # 阶段 1: 环境准备
+      # ===========================================================
+
+      - name: "[1.1] 克隆配置仓库"
+        uses: actions/checkout@v4
+
+      - name: "[1.2] 加载设备配置"
+        id: device
+        run: |
+          DEVICE="${{ inputs.device }}"
+          CONF="Devices/${DEVICE}/device.yaml"
+
+          if [ ! -f "$CONF" ]; then
+            echo "::error::设备配置不存在: $CONF"
+            exit 1
+          fi
+
+          CONFIG_FILE=$(grep 'config_file:' "$CONF" | awk '{print $2}' | tr -d '"' | tr -d "'")
+          FIRMWARE_DIR=$(grep 'firmware_dir:' "$CONF" | awk '{print $2}' | tr -d '"' | tr -d "'")
+
+          echo "config_file=${CONFIG_FILE}" >> $GITHUB_OUTPUT
+          echo "firmware_dir=${FIRMWARE_DIR}" >> $GITHUB_OUTPUT
+
+          echo "=========================================="
+          echo "  设备配置信息"
+          echo "=========================================="
+          echo "  设备: ${DEVICE}"
+          echo "  配置: ${CONFIG_FILE}"
+          echo "  固件: ${FIRMWARE_DIR}"
+          echo "=========================================="
+
+      - name: "[1.3] 确定版本标签"
+        id: version
+        run: |
+          INPUT_TAG="${{ inputs.tag }}"
+
+          if [ "$INPUT_TAG" = "latest" ]; then
+            LATEST_TAG=$(git ls-remote --tags --sort=-v:refname https://github.com/immortalwrt/immortalwrt.git \
+              | grep -oP 'refs/tags/\K[v0-9.]+$' \
+              | head -1)
+            echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+            echo "[OK] 使用最新版本: $LATEST_TAG"
+          else
+            echo "tag=$INPUT_TAG" >> $GITHUB_OUTPUT
+            echo "[OK] 使用指定版本: $INPUT_TAG"
+          fi
+
+      # ===========================================================
+      # 阶段 2: 克隆源码
+      # ===========================================================
+
+      - name: "[2.1] 克隆 ImmortalWrt 源码"
+        run: |
+          git clone -b ${{ steps.version.outputs.tag }} \
+            --single-branch --filter=blob:none \
+            https://github.com/immortalwrt/immortalwrt.git \
+            /tmp/immortalwrt
+          ln -sf /tmp/immortalwrt $GITHUB_WORKSPACE/immortalwrt
+
+      - name: "[2.2] 更新 feeds"
+        working-directory: immortalwrt
+        run: ./scripts/feeds update -a
+
+      - name: "[2.3] 安装 feeds"
+        working-directory: immortalwrt
+        run: ./scripts/feeds install -a
+
+      # ===========================================================
+      # 阶段 3: 提取设备 TARGET 配置
+      # ===========================================================
+
+      - name: "[3.1] 提取设备 TARGET 配置"
+        id: targets
+        run: |
+          DEVICE="${{ inputs.device }}"
+          CONFIG_FILE="${{ steps.device.outputs.config_file }}"
+          DEVICE_CONFIG="Devices/${DEVICE}/${CONFIG_FILE}"
+
+          echo "=========================================="
+          echo "  提取设备 TARGET 配置"
+          echo "=========================================="
+          echo "  设备: ${DEVICE}"
+          echo "  配置文件: ${CONFIG_FILE}"
+          echo "  完整路径: ${DEVICE_CONFIG}"
+          echo "=========================================="
+
+          if [ ! -f "$DEVICE_CONFIG" ]; then
+            echo "[ERROR] 设备配置文件不存在: $DEVICE_CONFIG"
+            exit 1
+          fi
+
+          # 显示文件信息
+          echo "文件大小: $(wc -c < "$DEVICE_CONFIG") bytes"
+          echo "文件行数: $(wc -l < "$DEVICE_CONFIG")"
+          echo ""
+
+          # 提取所有 CONFIG_TARGET_*_DEVICE_* 配置项
+          echo "搜索 CONFIG_TARGET.*_DEVICE_.*=y ..."
+          DEVICE_TARGETS=$(grep -E '^CONFIG_TARGET.*_DEVICE_.*=y$' "$DEVICE_CONFIG" | sed 's/=y$//' | sed 's/^CONFIG_TARGET_//')
+
+          if [ -z "$DEVICE_TARGETS" ]; then
+            echo "[WARN] 未找到 CONFIG_TARGET.*_DEVICE_.*=y 配置项"
+            echo ""
+            echo "尝试搜索所有 CONFIG_TARGET_*=y 配置项..."
+            DEVICE_TARGETS=$(grep -E '^CONFIG_TARGET_.*=y$' "$DEVICE_CONFIG" | sed 's/=y$//' | sed 's/^CONFIG_TARGET_//')
+          fi
+
+          if [ -z "$DEVICE_TARGETS" ]; then
+            echo "[WARN] 未找到任何 CONFIG_TARGET 配置项"
+            echo "target_count=0" >> $GITHUB_OUTPUT
+          else
+            TARGET_COUNT=$(echo "$DEVICE_TARGETS" | wc -l)
+            echo "target_count=${TARGET_COUNT}" >> $GITHUB_OUTPUT
+            echo "[OK] 找到 ${TARGET_COUNT} 个设备 TARGET:"
+            echo "$DEVICE_TARGETS"
+          fi
+
+          # 保存到文件供后续使用
+          echo "$DEVICE_TARGETS" > /tmp/device_targets.txt
+
+          echo "=========================================="
+
+      # ===========================================================
+      # 阶段 4: 生成默认配置
+      # ===========================================================
+
+      - name: "[4.1] 生成默认配置"
+        if: steps.targets.outputs.target_count != '0'
+        working-directory: immortalwrt
+        run: |
+          DEVICE="${{ inputs.device }}"
+          OUTPUT_DIR="$GITHUB_WORKSPACE/generated_configs"
+          mkdir -p "$OUTPUT_DIR"
+
+          echo "=========================================="
+          echo "  生成设备默认配置"
+          echo "=========================================="
+
+          # 读取设备 TARGET 列表
+          while IFS= read -r target; do
+            if [ -z "$target" ]; then
+              continue
+            fi
+
+            echo ""
+            echo "处理 TARGET: CONFIG_TARGET_${target}"
+
+            # 清理之前的配置
+            make distclean 2>/dev/null || true
+
+            # 创建最小配置，只启用目标设备
+            echo "CONFIG_TARGET_${target}=y" > .config
+
+            # 运行 defconfig 生成完整配置
+            make defconfig 2>/dev/null
+
+            # 复制生成的配置
+            OUTPUT_FILE="${OUTPUT_DIR}/default_${target}.config"
+            cp .config "$OUTPUT_FILE"
+
+            # 统计配置项数量
+            CONFIG_COUNT=$(grep -c '^CONFIG_' "$OUTPUT_FILE" 2>/dev/null || echo "0")
+            echo "[OK] 已生成: ${OUTPUT_FILE} (${CONFIG_COUNT} 项)"
+
+          done < /tmp/device_targets.txt
+
+          echo ""
+          echo "=========================================="
+          echo "  生成完成"
+          echo "=========================================="
+          ls -la "$OUTPUT_DIR"
+          echo "=========================================="
+
+      # ===========================================================
+      # 阶段 5: 对比配置
+      # ===========================================================
+
+      - name: "[5.1] 对比配置差异"
+        if: steps.targets.outputs.target_count != '0'
+        run: |
+          DEVICE="${{ inputs.device }}"
+          CONFIG_FILE="${{ steps.device.outputs.config_file }}"
+          DEVICE_CONFIG="Devices/${DEVICE}/${CONFIG_FILE}"
+          OUTPUT_DIR="$GITHUB_WORKSPACE/generated_configs"
+          REPORT_FILE="$GITHUB_WORKSPACE/config_diff_report.txt"
+
+          echo "============================================" > "$REPORT_FILE"
+          echo "  设备配置差异报告" >> "$REPORT_FILE"
+          echo "============================================" >> "$REPORT_FILE"
+          echo "  设备: ${DEVICE}" >> "$REPORT_FILE"
+          echo "  版本: ${{ steps.version.outputs.tag }}" >> "$REPORT_FILE"
+          echo "  时间: $(date '+%Y-%m-%d %H:%M:%S')" >> "$REPORT_FILE"
+          echo "============================================" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+
+          # 提取设备配置中的有效配置行
+          grep -E '^CONFIG_' "$DEVICE_CONFIG" | sort > /tmp/device_sorted.config
+
+          DEVICE_COUNT=$(wc -l < /tmp/device_sorted.config)
+
+          # 对比每个生成的配置
+          for generated in "$OUTPUT_DIR"/*.config; do
+            if [ ! -f "$generated" ]; then
+              continue
+            fi
+
+            TARGET_NAME=$(basename "$generated" .config | sed 's/^default_//')
+            echo "" >> "$REPORT_FILE"
+            echo "============================================" >> "$REPORT_FILE"
+            echo "  TARGET: ${TARGET_NAME}" >> "$REPORT_FILE"
+            echo "============================================" >> "$REPORT_FILE"
+
+            # 提取生成配置中的有效配置行
+            grep -E '^CONFIG_' "$generated" | sort > /tmp/generated_sorted.config
+
+            GENERATED_COUNT=$(wc -l < /tmp/generated_sorted.config)
+            DEVICE_ONLY=$(comm -23 /tmp/device_sorted.config /tmp/generated_sorted.config | wc -l)
+            GENERATED_ONLY=$(comm -13 /tmp/device_sorted.config /tmp/generated_sorted.config | wc -l)
+
+            echo "" >> "$REPORT_FILE"
+            echo "配置项统计:" >> "$REPORT_FILE"
+            echo "  设备配置 (default.config): ${DEVICE_COUNT} 项" >> "$REPORT_FILE"
+            echo "  生成配置: ${GENERATED_COUNT} 项" >> "$REPORT_FILE"
+            echo "  设备独有: ${DEVICE_ONLY} 项" >> "$REPORT_FILE"
+            echo "  默认独有: ${GENERATED_ONLY} 项" >> "$REPORT_FILE"
+            echo "" >> "$REPORT_FILE"
+
+            echo "--- 设备配置独有项 (设备自定义) ---" >> "$REPORT_FILE"
+            comm -23 /tmp/device_sorted.config /tmp/generated_sorted.config | head -100 >> "$REPORT_FILE"
+            if [ "$DEVICE_ONLY" -gt 100 ]; then
+              echo "... 共 ${DEVICE_ONLY} 项" >> "$REPORT_FILE"
+            fi
+            echo "" >> "$REPORT_FILE"
+
+            echo "--- 值不同的配置项 ---" >> "$REPORT_FILE"
+            diff --suppress-common-lines /tmp/device_sorted.config /tmp/generated_sorted.config | grep -E '^[<>]' | head -100 >> "$REPORT_FILE"
+            echo "" >> "$REPORT_FILE"
+
+          done
+
+          echo "[OK] 差异报告已生成: ${REPORT_FILE}"
+
+      - name: "[5.2] 上传配置文件"
+        if: steps.targets.outputs.target_count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: "Device-Config-${{ inputs.device }}-${{ steps.version.outputs.tag }}"
+          path: |
+            generated_configs/
+            config_diff_report.txt
+          retention-days: 30
+
+      - name: "[5.3] 显示报告摘要"
+        if: steps.targets.outputs.target_count != '0'
+        run: |
+          echo "=========================================="
+          echo "  配置差异报告摘要"
+          echo "=========================================="
+          cat config_diff_report.txt | head -100
+          echo ""
+          echo "完整报告请下载 Artifacts 查看"
+          echo "=========================================="

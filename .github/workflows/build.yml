@@ -1,0 +1,535 @@
+#
+# ImmortalWrt 自动编译
+# https://github.com/lmwm/test
+#
+# 单一工作流，通过 device 参数选择设备
+# 设备参数从 Devices/<device>/device.yaml 读取
+# 自定义包从 Devices/<device>/packages.yaml 读取
+# 设备定制从 Devices/<device>/customize.sh 执行
+#
+
+name: "Build ImmortalWrt"
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "目标设备"
+        type: choice
+        options:
+          - "Cudy TR3000"
+        default: "Cudy TR3000"
+        required: true
+      tag:
+        description: "ImmortalWrt 版本标签"
+        type: choice
+        options:
+          - latest
+          - v25.12.1
+          - v25.12.0
+          - v24.10.6
+          - v24.10.5
+        default: latest
+        required: true
+      disk_cleanup:
+        description: "启用磁盘空间清理"
+        type: boolean
+        default: false
+      skip_compile:
+        description: "跳过编译（调试模式）"
+        type: boolean
+        default: false
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  # ============================================================
+  # 固件编译
+  # ============================================================
+  build:
+    runs-on: ubuntu-latest
+    name: "编译固件"
+
+    steps:
+      # ===========================================================
+      # 阶段 1: 系统环境初始化
+      # ===========================================================
+
+      # ----------------------------------------------------------
+      # 1.1 系统信息
+      # ----------------------------------------------------------
+      - name: "[1.1] 系统信息"
+        run: |
+          echo "=========================================="
+          echo "  系统信息"
+          echo "=========================================="
+          echo ""
+
+          # 系统版本
+          echo "[系统]"
+          echo "  OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')"
+          echo "  Kernel: $(uname -r)"
+          echo "  Arch: $(uname -m)"
+          echo ""
+
+          # CPU 信息
+          echo "[CPU]"
+          CPU_MODEL=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs)
+          CPU_CORES=$(nproc 2>/dev/null || echo "未知")
+          echo "  型号: ${CPU_MODEL:-未知}"
+          echo "  核心: ${CPU_CORES} 核"
+          echo ""
+
+          # 内存信息
+          echo "[内存]"
+          free -h | awk '/^Mem:/ {printf "  总量: %s\n  已用: %s\n  可用: %s\n", $2, $3, $7}'
+          echo ""
+
+          # 磁盘信息
+          echo "[磁盘]"
+          echo "  工作目录: $GITHUB_WORKSPACE"
+          df -hT "$GITHUB_WORKSPACE" | awk 'NR==2 {printf "  文件系统: %s\n  总量: %s\n  已用: %s (%s)\n  可用: %s\n", $1, $2, $3, $5, $4}'
+          echo ""
+
+          echo "=========================================="
+
+      # ----------------------------------------------------------
+      # 1.2 磁盘空间清理
+      # ----------------------------------------------------------
+      - name: "[1.2] 磁盘空间清理"
+        if: ${{ inputs.disk_cleanup }}
+        run: |
+          echo "=========================================="
+          echo "  磁盘空间清理"
+          echo "=========================================="
+          echo ""
+
+          # 清理前
+          echo "[清理前]"
+          df -hT "$GITHUB_WORKSPACE" | awk 'NR==2 {printf "  可用: %s\n", $4}'
+          echo ""
+
+          # 清理 apt 缓存
+          echo "[清理] apt 缓存..."
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+
+          # 清理后
+          echo ""
+          echo "[清理后]"
+          df -hT "$GITHUB_WORKSPACE" | awk 'NR==2 {printf "  可用: %s\n", $4}'
+          echo ""
+          echo "=========================================="
+
+      # ----------------------------------------------------------
+      # 1.3 克隆配置仓库
+      # ----------------------------------------------------------
+      - name: "[1.3] 克隆配置仓库"
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------
+      # 1.4 加载设备配置
+      # ----------------------------------------------------------
+      - name: "[1.4] 加载设备配置"
+        id: device
+        run: |
+          DEVICE="${{ inputs.device }}"
+          CONF="Devices/${DEVICE}/device.yaml"
+
+          if [ ! -f "$CONF" ]; then
+            echo "::error::设备配置不存在: $CONF"
+            exit 1
+          fi
+
+          # 解析 YAML 配置（正确处理带空格的值）
+          DEVICE_MODEL=$(grep 'model:' "$CONF" | sed 's/model: *//' | tr -d '"' | tr -d "'")
+          FIRMWARE_DIR=$(grep 'firmware_dir:' "$CONF" | sed 's/firmware_dir: *//' | tr -d '"' | tr -d "'")
+          PACKAGES_LIST=$(grep 'packages_list:' "$CONF" | sed 's/packages_list: *//' | tr -d '"' | tr -d "'")
+          DEVICE_TARGET=$(grep 'target:' "$CONF" | sed 's/target: *//' | tr -d '"' | tr -d "'")
+
+          echo "device_dir=Devices/${DEVICE}" >> $GITHUB_OUTPUT
+          echo "model=${DEVICE_MODEL}" >> $GITHUB_OUTPUT
+          echo "firmware_dir=${FIRMWARE_DIR}" >> $GITHUB_OUTPUT
+          echo "packages_list=${PACKAGES_LIST}" >> $GITHUB_OUTPUT
+          echo "target=${DEVICE_TARGET}" >> $GITHUB_OUTPUT
+
+          echo "=========================================="
+          echo "  设备配置"
+          echo "=========================================="
+          echo "  设备: ${DEVICE}"
+          echo "  型号: ${DEVICE_MODEL}"
+          echo "  固件: ${FIRMWARE_DIR}"
+          echo "  包列表: ${PACKAGES_LIST}"
+          echo "  TARGET: ${DEVICE_TARGET}"
+          echo "=========================================="
+
+      # ===========================================================
+      # 阶段 2: 源码准备
+      # ===========================================================
+
+      # ----------------------------------------------------------
+      # 2.1 安装编译环境
+      # ----------------------------------------------------------
+      - name: "[2.1] 安装编译环境"
+        run: |
+          echo "=========================================="
+          echo "  安装编译环境"
+          echo "=========================================="
+
+          sudo apt-get update -y
+          sudo apt-get upgrade -y
+
+          sudo apt-get install -y --no-install-recommends \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison \
+            build-essential bzip2 ccache clang cmake cpio curl \
+            device-tree-compiler ecj fastjar flex gawk gettext \
+            gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man \
+            intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev \
+            libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev \
+            libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev \
+            libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip \
+            p7zip-full patch pkgconf python3 python3-pip python3-ply \
+            python3-docutils python3-pyelftools python3-setuptools qemu-utils \
+            re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs \
+            upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          echo "[OK] 编译环境安装完成"
+          echo "=========================================="
+
+      # ----------------------------------------------------------
+      # 2.2 确定版本标签
+      # ----------------------------------------------------------
+      - name: "[2.2] 确定版本标签"
+        id: version
+        run: |
+          INPUT_TAG="${{ inputs.tag }}"
+
+          echo "=========================================="
+          echo "  确定 ImmortalWrt 版本"
+          echo "=========================================="
+
+          if [ "$INPUT_TAG" = "latest" ]; then
+            # 获取最新版本
+            LATEST_TAG=$(git ls-remote --tags --sort=-v:refname https://github.com/immortalwrt/immortalwrt.git \
+              | grep -oP 'refs/tags/\K[v0-9.]+$' \
+              | head -1)
+            echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+            echo "[OK] 使用最新版本: $LATEST_TAG"
+          else
+            echo "tag=$INPUT_TAG" >> $GITHUB_OUTPUT
+            echo "[OK] 使用指定版本: $INPUT_TAG"
+          fi
+
+          echo "=========================================="
+
+      # ----------------------------------------------------------
+      # 2.3 克隆 ImmortalWrt 源码
+      # ----------------------------------------------------------
+      - name: "[2.3] 克隆 ImmortalWrt 源码"
+        run: |
+          git clone -b ${{ steps.version.outputs.tag }} \
+            --single-branch --filter=blob:none \
+            https://github.com/immortalwrt/immortalwrt.git \
+            /tmp/immortalwrt
+          ln -sf /tmp/immortalwrt $GITHUB_WORKSPACE/immortalwrt
+
+      # ----------------------------------------------------------
+      # 2.4 更新 feeds
+      # ----------------------------------------------------------
+      - name: "[2.4] 更新 feeds"
+        working-directory: immortalwrt
+        run: ./scripts/feeds update -a
+
+      # ----------------------------------------------------------
+      # 2.5 安装 feeds
+      # ----------------------------------------------------------
+      - name: "[2.5] 安装 feeds"
+        working-directory: immortalwrt
+        run: ./scripts/feeds install -a
+
+      # ===========================================================
+      # 阶段 3: 自定义固件
+      # ===========================================================
+
+      # ----------------------------------------------------------
+      # 3.1 添加自定义软件包（git clone 等）
+      # ----------------------------------------------------------
+      - name: "[3.1] 添加自定义软件包"
+        run: |
+          DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
+          if [ -f "${DEVICE_DIR}/packages.sh" ]; then
+            chmod +x "${DEVICE_DIR}/packages.sh"
+            cd immortalwrt && bash "${GITHUB_WORKSPACE}/${DEVICE_DIR}/packages.sh"
+          else
+            echo "[INFO] 无 packages.sh，跳过"
+          fi
+
+      # ----------------------------------------------------------
+      # 3.2 设备定制
+      # ----------------------------------------------------------
+      - name: "[3.2] 设备定制"
+        run: |
+          DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
+          if [ -f "${DEVICE_DIR}/customize.sh" ]; then
+            chmod +x "${DEVICE_DIR}/customize.sh"
+            cd immortalwrt && bash "${GITHUB_WORKSPACE}/${DEVICE_DIR}/customize.sh"
+          else
+            echo "[INFO] 无设备定制脚本，跳过"
+          fi
+
+      # ----------------------------------------------------------
+      # 3.3 生成编译配置
+      # ----------------------------------------------------------
+      - name: "[3.3] 生成编译配置"
+        run: |
+          DEVICE_DIR="${{ steps.device.outputs.device_dir }}"
+          PACKAGES_LIST="${{ steps.device.outputs.packages_list }}"
+          DEVICE_TARGET="${{ steps.device.outputs.target }}"
+
+          echo "=========================================="
+          echo "  生成编译配置"
+          echo "=========================================="
+
+          # 创建初始配置：写入设备 TARGET
+          if [ -n "$DEVICE_TARGET" ]; then
+            echo "$DEVICE_TARGET" > immortalwrt/.config
+            echo "[OK] 设置设备 TARGET: $DEVICE_TARGET"
+          else
+            echo "[WARN] 未设置设备 TARGET，使用默认配置"
+            touch immortalwrt/.config
+          fi
+
+          # 如果存在 packages.yaml，解析启用和禁用的包
+          if [ -n "$PACKAGES_LIST" ] && [ -f "${DEVICE_DIR}/${PACKAGES_LIST}" ]; then
+            PACKAGES_FILE="${DEVICE_DIR}/${PACKAGES_LIST}"
+
+            # 解析启用的包
+            echo ""
+            echo "启用的包:"
+            in_enable=false
+            while IFS= read -r line; do
+              # 检测 enable: 段落
+              if echo "$line" | grep -q "^enable:"; then
+                in_enable=true
+                continue
+              fi
+              # 检测 disable: 段落（结束 enable）
+              if echo "$line" | grep -q "^disable:"; then
+                in_enable=false
+                continue
+              fi
+              # 处理 enable 段落的包
+              if [ "$in_enable" = true ]; then
+                pkg=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
+                if [ -n "$pkg" ]; then
+                  echo "CONFIG_PACKAGE_${pkg}=y" >> immortalwrt/.config
+                  echo "  + ${pkg}"
+                fi
+              fi
+            done < "$PACKAGES_FILE"
+
+            # 解析禁用的包
+            echo ""
+            echo "禁用的包:"
+            in_disable=false
+            while IFS= read -r line; do
+              # 检测 disable: 段落
+              if echo "$line" | grep -q "^disable:"; then
+                in_disable=true
+                continue
+              fi
+              # 检测 disable_components: 段落（结束 disable）
+              if echo "$line" | grep -q "^disable_components:"; then
+                in_disable=false
+                continue
+              fi
+              # 处理 disable 段落的包
+              if [ "$in_disable" = true ]; then
+                pkg=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
+                if [ -n "$pkg" ]; then
+                  echo "# CONFIG_PACKAGE_${pkg} is not set" >> immortalwrt/.config
+                  echo "  - ${pkg}"
+                fi
+              fi
+            done < "$PACKAGES_FILE"
+
+            # 解析禁用的子组件
+            echo ""
+            echo "禁用的子组件:"
+            in_components=false
+            current_pkg=""
+            while IFS= read -r line; do
+              # 检测 disable_components: 段落
+              if echo "$line" | grep -q "^disable_components:"; then
+                in_components=true
+                continue
+              fi
+              # 检测包名（如 luci-app-passwall:）
+              if [ "$in_components" = true ] && echo "$line" | grep -qE "^[[:space:]]+[a-zA-Z].*:"; then
+                current_pkg=$(echo "$line" | sed 's/^[[:space:]]*//' | sed 's/:.*//' | xargs)
+                continue
+              fi
+              # 检测下一个顶级键（结束）
+              if echo "$line" | grep -q "^[a-zA-Z]" && ! echo "$line" | grep -q "^disable_components:"; then
+                in_components=false
+                current_pkg=""
+                continue
+              fi
+              # 处理子组件
+              if [ "$in_components" = true ] && [ -n "$current_pkg" ]; then
+                component=$(echo "$line" | sed 's/^[[:space:]]*- //' | sed 's/#.*//' | xargs)
+                if [ -n "$component" ]; then
+                  echo "# CONFIG_PACKAGE_${current_pkg}_${component} is not set" >> immortalwrt/.config
+                  echo "  - ${current_pkg}_${component}"
+                fi
+              fi
+            done < "$PACKAGES_FILE"
+          else
+            echo "[INFO] 无 packages 配置文件，跳过"
+          fi
+
+          echo ""
+          echo "[OK] 配置文件已生成"
+          echo "=========================================="
+
+      # ----------------------------------------------------------
+      # 3.4 同步配置
+      # ----------------------------------------------------------
+      - name: "[3.4] 同步配置 (defconfig)"
+        working-directory: immortalwrt
+        run: make defconfig
+
+      # ----------------------------------------------------------
+      # 3.5 修复 Rust LLVM 下载问题
+      # ----------------------------------------------------------
+      - name: "[3.5] 修复 Rust LLVM CI 下载"
+        run: |
+          RUST_MAKEFILE="immortalwrt/feeds/packages/lang/rust/Makefile"
+          if [ -f "$RUST_MAKEFILE" ]; then
+            sed -i 's/--set=llvm\.download-ci-llvm=true/--set=llvm.download-ci-llvm=false/' "$RUST_MAKEFILE"
+            echo "[OK] 已禁用 download-ci-llvm"
+            grep 'download-ci-llvm' "$RUST_MAKEFILE"
+          else
+            echo "[WARN] Rust Makefile 不存在: $RUST_MAKEFILE"
+          fi
+
+      # ===========================================================
+      # 阶段 4: 编译固件
+      # ===========================================================
+
+      # ----------------------------------------------------------
+      # 4.1 预下载资源
+      # ----------------------------------------------------------
+      - name: "[4.1] 预下载资源"
+        if: ${{ !inputs.skip_compile }}
+        working-directory: immortalwrt
+        run: make download -j$(nproc) V=s
+
+      # ----------------------------------------------------------
+      # 4.2 编译固件
+      # ----------------------------------------------------------
+      - name: "[4.2] 编译固件"
+        if: ${{ !inputs.skip_compile }}
+        id: compile
+        working-directory: immortalwrt
+        run: |
+          echo "多线程编译: -j$(nproc)"
+          make -j$(nproc) || make -j1 || make -j1 V=s
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      # ----------------------------------------------------------
+      # 4.3 编译后磁盘使用
+      # ----------------------------------------------------------
+      - name: "[4.3] 编译后磁盘使用"
+        if: ${{ !inputs.skip_compile && !cancelled() }}
+        run: |
+          echo "=========================================="
+          echo "  编译后磁盘使用"
+          echo "=========================================="
+          df -hT "$GITHUB_WORKSPACE" | awk 'NR==2 {printf "  可用: %s / %s (%s 已用)\n", $4, $2, $5}'
+          echo "=========================================="
+
+      # ===========================================================
+      # 阶段 5: 上传固件
+      # ===========================================================
+
+      # ----------------------------------------------------------
+      # 5.1 整理固件
+      # ----------------------------------------------------------
+      - name: "[5.1] 整理固件"
+        id: organize
+        if: ${{ !inputs.skip_compile && steps.compile.outputs.status == 'success' && !cancelled() }}
+        run: |
+          MODEL="${{ steps.device.outputs.model }}"
+          FW_DIR="immortalwrt/${{ steps.device.outputs.firmware_dir }}"
+          VERSION="${{ steps.version.outputs.tag }}"
+          VERSION_RAW="${VERSION#v}"
+          BUILD_ID=$(head -1 immortalwrt/version 2>/dev/null || echo "unknown")
+          DATE_STR=$(date +%Y%m%d)
+          OUTPUT_DIR="$GITHUB_WORKSPACE/firmware"
+          mkdir -p "$OUTPUT_DIR"
+
+          if [ -d "$FW_DIR" ]; then
+            count=0
+            for file in "$FW_DIR"/*.itb; do
+              [ -f "$file" ] || continue
+              base=$(basename "$file")
+              case "$base" in
+                *squashfs-sysupgrade*) suffix="squashfs-sysupgrade" ;;
+                *initramfs-recovery*)  suffix="initramfs-recovery" ;;
+                *) suffix="${base##*-}"; suffix="${suffix%.itb}" ;;
+              esac
+              new_name="${DATE_STR}-${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-${suffix}.itb"
+              cp "$file" "$OUTPUT_DIR/$new_name"
+              echo "[FILE] $base -> $new_name"
+              count=$((count + 1))
+            done
+            echo "[OK] 共处理 $count 个固件"
+          else
+            echo "[ERROR] 固件目录不存在: $FW_DIR"
+            ls -la immortalwrt/bin/targets/ 2>/dev/null
+            exit 1
+          fi
+
+          # 复制配置文件
+          cp immortalwrt/.config "$OUTPUT_DIR/${DATE_STR}-${MODEL}-config"
+          echo "[FILE] .config -> ${DATE_STR}-${MODEL}-config"
+
+          echo "FIRMWARE=$OUTPUT_DIR" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      # ----------------------------------------------------------
+      # 5.2 上传固件 (squashfs-sysupgrade)
+      # ----------------------------------------------------------
+      - name: "[5.2] 上传固件 (squashfs-sysupgrade)"
+        uses: actions/upload-artifact@v4
+        if: ${{ !inputs.skip_compile && steps.organize.outputs.status == 'success' && !cancelled() }}
+        with:
+          name: "ImmortalWrt-${{ steps.device.outputs.model }}-${{ steps.version.outputs.tag }}-squashfs-sysupgrade"
+          path: ${{ env.FIRMWARE }}/*squashfs-sysupgrade*.itb
+          retention-days: 90
+
+      # ----------------------------------------------------------
+      # 5.3 上传固件 (initramfs-recovery)
+      # ----------------------------------------------------------
+      - name: "[5.3] 上传固件 (initramfs-recovery)"
+        uses: actions/upload-artifact@v4
+        if: ${{ !inputs.skip_compile && steps.organize.outputs.status == 'success' && !cancelled() }}
+        with:
+          name: "ImmortalWrt-${{ steps.device.outputs.model }}-${{ steps.version.outputs.tag }}-initramfs-recovery"
+          path: ${{ env.FIRMWARE }}/*initramfs-recovery*.itb
+          retention-days: 90
+
+      # ----------------------------------------------------------
+      # 5.4 上传配置文件
+      # ----------------------------------------------------------
+      - name: "[5.4] 上传配置文件"
+        uses: actions/upload-artifact@v4
+        if: ${{ !inputs.skip_compile && steps.organize.outputs.status == 'success' && !cancelled() }}
+        with:
+          name: "ImmortalWrt-${{ steps.device.outputs.model }}-${{ steps.version.outputs.tag }}-config"
+          path: ${{ env.FIRMWARE }}/*-config
+          retention-days: 90
