@@ -7,44 +7,68 @@
 ```
 .
 ├── .github/workflows/
-│   ├── build.yml              # 编译 workflow
-│   └── generate-config.yml    # 生成默认配置 workflow
+│   └── build.yml              # 编译工作流
 ├── Devices/                   # 设备目录（每个设备一个文件夹）
 │   └── Cudy TR3000/
 │       ├── device.yaml        # 设备参数（型号、固件目录、TARGET）
-│       ├── packages.list      # 自定义软件包列表
-│       ├── customize.sh       # 设备定制脚本
-│       ├── packages.sh        # 自定义软件包脚本（git clone 等）
-│       └── files/             # /etc overlay（可选）
+│       ├── packages.yaml      # 软件包配置（启用/禁用）
+│       ├── packages.sh        # 自定义软件包脚本（克隆外部仓库）
+│       └── customize.sh       # 设备定制脚本（修改 DTS 等）
 ├── README.md
-└── LICENSE
+└── .gitignore
 ```
 
 ## 使用方法
 
 1. Fork 本仓库
 2. 进入 **Actions** -> **Build ImmortalWrt**
-3. 选择设备 -> 点击 **Run workflow**
+3. 选择设备和版本 -> 点击 **Run workflow**
 4. 等待编译完成（约 2-4 小时）
-5. 在 Actions 页面右上角 **Artifacts** 下载固件
+5. 在 Actions 页面 **Artifacts** 下载固件
 
-## Workflow 参数
-
-### Build ImmortalWrt
+## 工作流参数
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `device` | 目标设备（下拉选择） | `Cudy TR3000` |
+| `device` | 目标设备 | `Cudy TR3000` |
 | `tag` | ImmortalWrt 版本标签 | `latest` |
 | `disk_cleanup` | 启用磁盘空间清理 | `false` |
 | `skip_compile` | 跳过编译（调试模式） | `false` |
 
-### Generate Device Config
+## 编译流程
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `device` | 目标设备（下拉选择） | `Cudy TR3000` |
-| `tag` | ImmortalWrt 版本标签 | `latest` |
+```
+阶段 1: 系统环境初始化
+  [1.1] 系统信息
+  [1.2] 磁盘空间清理（可选）
+  [1.3] 克隆配置仓库
+  [1.4] 加载设备配置
+
+阶段 2: 源码准备
+  [2.1] 安装编译环境
+  [2.2] 确定版本标签
+  [2.3] 克隆 ImmortalWrt 源码
+  [2.4] 更新 feeds
+  [2.5] 安装 feeds
+
+阶段 3: 自定义固件
+  [3.1] 添加自定义软件包（packages.sh）
+  [3.2] 设备定制（customize.sh）
+  [3.3] 生成编译配置（packages.yaml）
+  [3.4] 同步配置（make defconfig）
+  [3.5] 修复 Rust LLVM
+
+阶段 4: 编译固件
+  [4.1] 预下载资源
+  [4.2] 编译固件
+  [4.3] 编译后磁盘使用
+
+阶段 5: 上传固件
+  [5.1] 整理固件
+  [5.2] 上传 squashfs-sysupgrade
+  [5.3] 上传 initramfs-recovery
+  [5.4] 上传配置文件
+```
 
 ## 配置文件说明
 
@@ -60,43 +84,69 @@ model: "Cudy TR3000"
 firmware_dir: "bin/targets/mediatek/filogic"
 
 # 自定义软件包列表文件
-packages_list: "packages.list"
+packages_list: "packages.yaml"
 
 # 设备 TARGET（用于 make defconfig）
 target: "CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-v1-ubootmod=y"
 ```
 
-### packages.list
+### packages.yaml
 
-自定义软件包列表，每行一个包名：
+软件包配置文件，管理启用和禁用的包：
 
-```bash
-# LuCI 应用
-luci-app-firewall
-luci-app-mwan3
-luci-app-ttyd
+```yaml
+# 启用的包
+enable:
+  - luci-i18n-base-zh-cn
+  - luci-theme-argon
+  - luci-app-mwan3
+  - luci-app-ttyd
+  - luci-app-openclash
+  - kmod-mtd-rw
 
-# 网络工具
-curl
-ip-full
-etherwake
+# 禁用的包（本体）
+disable:
+  - luci-app-passwall
+  - luci-app-rclone
 
-# 内核模块
-kmod-mtd-rw
-kmod-tun
+# 禁用的子组件
+disable_components:
+  luci-app-passwall:
+    - INCLUDE_Haproxy
+    - INCLUDE_SingBox
+    - INCLUDE_Xray
 ```
 
 ### packages.sh
 
-用于更复杂的自定义，如 git clone 外部仓库：
+克隆外部仓库的脚本（从 GitHub 获取最新版本）：
 
 ```bash
 #!/bin/bash
 set -e
 
-# 添加 OpenClash
-git clone --depth 1 https://github.com/vernesong/OpenClash.git /tmp/OpenClash
-cp -rf /tmp/OpenClash/luci-app-openclash "$(pwd)/package/app/"
+OPENWRT_DIR="$(pwd)"
+
+# 删除 feeds 旧版本，克隆到 package/app/
+find "$OPENWRT_DIR/package/feeds/" -name "luci-app-openclash" -exec rm -rf {} + 2>/dev/null
+git clone --depth 1 https://github.com/vernesong/OpenClash.git \
+    "$OPENWRT_DIR/package/app/OpenClash"
+echo "[OK] 已添加: OpenClash"
+```
+
+### customize.sh
+
+设备定制脚本（修改 DTS、内核配置等）：
+
+```bash
+#!/bin/bash
+set -e
+
+# 修改设备型号名称
+DTS_FILE="target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1-ubootmod.dts"
+if [ -f "$DTS_FILE" ]; then
+    sed -i 's/Cudy TR3000 v1 (OpenWrt U-Boot layout)/Cudy TR3000/g' "$DTS_FILE"
+fi
 ```
 
 ## 添加新设备
@@ -106,53 +156,51 @@ cp -rf /tmp/OpenClash/luci-app-openclash "$(pwd)/package/app/"
 ### 1. 创建设备目录
 
 ```bash
-mkdir -p "Devices/NanoPi R4S/files"
+mkdir -p "Devices/NanoPi R4S"
 ```
 
 ### 2. 创建 device.yaml
 
-编辑 `Devices/NanoPi R4S/device.yaml`：
-
 ```yaml
 model: "NanoPi R4S"
 firmware_dir: "bin/targets/rockchip/armv8"
-packages_list: "packages.list"
+packages_list: "packages.yaml"
 target: "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r4s=y"
 ```
 
-### 3. 创建 packages.list
+### 3. 创建 packages.yaml
 
-编辑 `Devices/NanoPi R4S/packages.list`：
+```yaml
+enable:
+  - luci-i18n-base-zh-cn
+  - luci-app-mwan3
+  - luci-app-ttyd
 
-```bash
-# LuCI 应用
-luci-app-firewall
-luci-app-mwan3
-
-# 网络工具
-curl
-etherwake
+disable:
+  - luci-app-passwall
 ```
 
-### 4. 编写 customize.sh（可选）
+### 4. 编写 packages.sh（可选）
 
-编辑 `Devices/NanoPi R4S/customize.sh`：
+```bash
+#!/bin/bash
+set -e
+OPENWRT_DIR="$(pwd)"
+
+git clone --depth 1 https://github.com/vernesong/OpenClash.git \
+    "$OPENWRT_DIR/package/app/OpenClash"
+```
+
+### 5. 编写 customize.sh（可选）
 
 ```bash
 #!/bin/bash
 set -e
 
-# 修改 DTS 设备型号
 DTS_FILE="target/linux/rockchip/dts/rk3399-nanopi-r4s.dts"
 if [ -f "$DTS_FILE" ]; then
-    sed -i 's/FriendlyARM NanoPi R4S/FriendlyARM NanoPi R4S Custom/g' "$DTS_FILE"
+    sed -i 's/FriendlyARM NanoPi R4S/NanoPi R4S/g' "$DTS_FILE"
 fi
-```
-
-### 5. 放入设备专属 files（可选）
-
-```bash
-cp /etc/config/network "Devices/NanoPi R4S/files/etc/config/"
 ```
 
 ### 6. 注册设备
@@ -164,10 +212,24 @@ device:
   type: choice
   options:
     - "Cudy TR3000"
-    - "NanoPi R4S"    # <- 添加
+    - "NanoPi R4S"
 ```
 
-完成。每个设备的定制逻辑完全独立，互不影响。
+## 已支持设备
+
+| 设备 | TARGET | 状态 |
+|------|--------|------|
+| Cudy TR3000 | `CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-v1-ubootmod=y` | 支持 |
+
+## 输出文件
+
+编译完成后会上传 3 个 Artifact：
+
+| 文件 | 说明 |
+|------|------|
+| `ImmortalWrt-设备-版本-squashfs-sysupgrade.zip` | 系统升级固件 |
+| `ImmortalWrt-设备-版本-initramfs-recovery.zip` | 恢复固件 |
+| `ImmortalWrt-设备-版本-config.zip` | 编译配置文件 |
 
 ## 许可证
 
