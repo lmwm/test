@@ -144,13 +144,11 @@ jobs:
 
           # 解析 YAML 配置（正确处理带空格的值）
           DEVICE_MODEL=$(grep 'model:' "$CONF" | sed 's/model: *//' | tr -d '"' | tr -d "'")
-          FIRMWARE_DIR=$(grep 'firmware_dir:' "$CONF" | sed 's/firmware_dir: *//' | tr -d '"' | tr -d "'")
           PACKAGES_LIST=$(grep 'packages_list:' "$CONF" | sed 's/packages_list: *//' | tr -d '"' | tr -d "'")
           DEVICE_TARGET=$(grep 'target:' "$CONF" | sed 's/target: *//' | tr -d '"' | tr -d "'")
 
           echo "device_dir=Devices/${DEVICE}" >> $GITHUB_OUTPUT
           echo "model=${DEVICE_MODEL}" >> $GITHUB_OUTPUT
-          echo "firmware_dir=${FIRMWARE_DIR}" >> $GITHUB_OUTPUT
           echo "packages_list=${PACKAGES_LIST}" >> $GITHUB_OUTPUT
           echo "target=${DEVICE_TARGET}" >> $GITHUB_OUTPUT
 
@@ -159,7 +157,6 @@ jobs:
           echo "=========================================="
           echo "  设备: ${DEVICE}"
           echo "  型号: ${DEVICE_MODEL}"
-          echo "  固件: ${FIRMWARE_DIR}"
           echo "  包列表: ${PACKAGES_LIST}"
           echo "  TARGET: ${DEVICE_TARGET}"
           echo "=========================================="
@@ -464,7 +461,6 @@ jobs:
         if: ${{ !inputs.skip_compile && steps.compile.outputs.status == 'success' && !cancelled() }}
         run: |
           MODEL="${{ steps.device.outputs.model }}"
-          FW_DIR="immortalwrt/${{ steps.device.outputs.firmware_dir }}"
           VERSION="${{ steps.version.outputs.tag }}"
           VERSION_RAW="${VERSION#v}"
           BUILD_ID=$(head -1 immortalwrt/version 2>/dev/null || echo "unknown")
@@ -472,25 +468,59 @@ jobs:
           OUTPUT_DIR="$GITHUB_WORKSPACE/firmware"
           mkdir -p "$OUTPUT_DIR"
 
-          if [ -d "$FW_DIR" ]; then
+          echo "=========================================="
+          echo "  查找固件文件"
+          echo "=========================================="
+
+          # 从 TARGET 配置提取平台信息
+          # CONFIG_TARGET_mediatek_filogic_DEVICE_xxx -> mediatek/filogic
+          DEVICE_TARGET="${{ steps.device.outputs.target }}"
+          if [ -n "$DEVICE_TARGET" ]; then
+            # 提取 TARGET_mediatek_filogic 部分
+            TARGET_PART=$(echo "$DEVICE_TARGET" | sed 's/CONFIG_TARGET_//' | sed 's/_DEVICE_.*//')
+            # 将下划线转换为斜杠: mediatek_filogic -> mediatek/filogic
+            PLATFORM_PATH=$(echo "$TARGET_PART" | sed 's/_/\//g')
+            FW_DIR="immortalwrt/bin/targets/${PLATFORM_PATH}"
+            echo "[INFO] 从 TARGET 推断固件目录: ${FW_DIR}"
+          else
+            FW_DIR=""
+            echo "[WARN] 未设置 TARGET，将搜索整个 targets 目录"
+          fi
+
+          # 查找固件文件
+          if [ -n "$FW_DIR" ] && [ -d "$FW_DIR" ]; then
+            # 精确查找指定目录
+            FW_FILES=$(find "$FW_DIR" -maxdepth 1 -type f \( -name "*.itb" -o -name "*.bin" -o -name "*.img.gz" -o -name "*.squashfs" \) 2>/dev/null | grep -E "(sysupgrade|recovery|factory)" || true)
+          else
+            # 搜索整个 targets 目录
+            FW_FILES=$(find immortalwrt/bin/targets -type f \( -name "*.itb" -o -name "*.bin" -o -name "*.img.gz" -o -name "*.squashfs" \) 2>/dev/null | grep -E "(sysupgrade|recovery|factory)" || true)
+          fi
+
+          if [ -n "$FW_FILES" ]; then
             count=0
-            for file in "$FW_DIR"/*.itb; do
-              [ -f "$file" ] || continue
+            echo "$FW_FILES" | while read -r file; do
               base=$(basename "$file")
+              ext="${base##*.}"
               case "$base" in
                 *squashfs-sysupgrade*) suffix="squashfs-sysupgrade" ;;
+                *squashfs-factory*)    suffix="squashfs-factory" ;;
                 *initramfs-recovery*)  suffix="initramfs-recovery" ;;
-                *) suffix="${base##*-}"; suffix="${suffix%.itb}" ;;
+                *sysupgrade*)          suffix="sysupgrade" ;;
+                *recovery*)            suffix="recovery" ;;
+                *factory*)             suffix="factory" ;;
+                *) suffix="${base%.*}" ;;
               esac
-              new_name="${DATE_STR}-${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-${suffix}.itb"
+              new_name="${DATE_STR}-${MODEL}-ImmortalWrt-V${VERSION_RAW}-${BUILD_ID}-${suffix}.${ext}"
               cp "$file" "$OUTPUT_DIR/$new_name"
               echo "[FILE] $base -> $new_name"
               count=$((count + 1))
             done
             echo "[OK] 共处理 $count 个固件"
           else
-            echo "[ERROR] 固件目录不存在: $FW_DIR"
-            ls -la immortalwrt/bin/targets/ 2>/dev/null
+            echo "[ERROR] 未找到固件文件"
+            echo "期望目录: ${FW_DIR}"
+            echo "目录结构:"
+            find immortalwrt/bin/targets -type f 2>/dev/null | head -20
             exit 1
           fi
 
@@ -498,29 +528,33 @@ jobs:
           cp immortalwrt/.config "$OUTPUT_DIR/${DATE_STR}-${MODEL}-config"
           echo "[FILE] .config -> ${DATE_STR}-${MODEL}-config"
 
+          echo ""
+          echo "[OK] 固件整理完成"
+          echo "=========================================="
+
           echo "FIRMWARE=$OUTPUT_DIR" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
 
       # ----------------------------------------------------------
       # 5.2 上传固件 (squashfs-sysupgrade)
       # ----------------------------------------------------------
-      - name: "[5.2] 上传固件 (squashfs-sysupgrade)"
+      - name: "[5.2] 上传固件 (sysupgrade)"
         uses: actions/upload-artifact@v4
         if: ${{ !inputs.skip_compile && steps.organize.outputs.status == 'success' && !cancelled() }}
         with:
-          name: "ImmortalWrt-${{ steps.device.outputs.model }}-${{ steps.version.outputs.tag }}-squashfs-sysupgrade"
-          path: ${{ env.FIRMWARE }}/*squashfs-sysupgrade*.itb
+          name: "ImmortalWrt-${{ steps.device.outputs.model }}-${{ steps.version.outputs.tag }}-sysupgrade"
+          path: ${{ env.FIRMWARE }}/*sysupgrade*
           retention-days: 90
 
       # ----------------------------------------------------------
-      # 5.3 上传固件 (initramfs-recovery)
+      # 5.3 上传固件 (recovery/factory)
       # ----------------------------------------------------------
-      - name: "[5.3] 上传固件 (initramfs-recovery)"
+      - name: "[5.3] 上传固件 (recovery/factory)"
         uses: actions/upload-artifact@v4
         if: ${{ !inputs.skip_compile && steps.organize.outputs.status == 'success' && !cancelled() }}
         with:
-          name: "ImmortalWrt-${{ steps.device.outputs.model }}-${{ steps.version.outputs.tag }}-initramfs-recovery"
-          path: ${{ env.FIRMWARE }}/*initramfs-recovery*.itb
+          name: "ImmortalWrt-${{ steps.device.outputs.model }}-${{ steps.version.outputs.tag }}-recovery"
+          path: ${{ env.FIRMWARE }}/*{recovery,factory}*
           retention-days: 90
 
       # ----------------------------------------------------------
@@ -532,4 +566,15 @@ jobs:
         with:
           name: "ImmortalWrt-${{ steps.device.outputs.model }}-${{ steps.version.outputs.tag }}-config"
           path: ${{ env.FIRMWARE }}/*-config
+          retention-days: 90
+
+      # ----------------------------------------------------------
+      # 5.5 上传整个固件目录
+      # ----------------------------------------------------------
+      - name: "[5.5] 上传完整固件包"
+        uses: actions/upload-artifact@v4
+        if: ${{ !inputs.skip_compile && steps.organize.outputs.status == 'success' && !cancelled() }}
+        with:
+          name: "ImmortalWrt-${{ steps.device.outputs.model }}-${{ steps.version.outputs.tag }}-full"
+          path: ${{ env.FIRMWARE }}/*
           retention-days: 90

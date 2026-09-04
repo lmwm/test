@@ -80,9 +80,6 @@
 # 设备型号（用于固件命名）
 model: "Cudy TR3000"
 
-# 固件输出目录（相对于 immortalwrt 源码根目录）
-firmware_dir: "bin/targets/mediatek/filogic"
-
 # 自定义软件包列表文件
 packages_list: "packages.yaml"
 
@@ -163,7 +160,6 @@ mkdir -p "Devices/NanoPi R4S"
 
 ```yaml
 model: "NanoPi R4S"
-firmware_dir: "bin/targets/rockchip/armv8"
 packages_list: "packages.yaml"
 target: "CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r4s=y"
 ```
@@ -223,13 +219,16 @@ device:
 
 ## 输出文件
 
-编译完成后会上传 3 个 Artifact：
+编译完成后会上传 4 个 Artifact：
 
 | 文件 | 说明 |
 |------|------|
-| `ImmortalWrt-设备-版本-squashfs-sysupgrade.zip` | 系统升级固件 |
-| `ImmortalWrt-设备-版本-initramfs-recovery.zip` | 恢复固件 |
+| `ImmortalWrt-设备-版本-sysupgrade.zip` | 系统升级固件 |
+| `ImmortalWrt-设备-版本-recovery.zip` | 恢复/工厂固件 |
 | `ImmortalWrt-设备-版本-config.zip` | 编译配置文件 |
+| `ImmortalWrt-设备-版本-full.zip` | 完整固件包（包含以上所有） |
+
+支持的固件格式：`.itb`、`.bin`、`.img.gz`、`.squashfs`
 
 ## 许可证
 

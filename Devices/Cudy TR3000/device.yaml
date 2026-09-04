@@ -4,9 +4,6 @@
 # 设备型号（用于固件命名）
 model: "Cudy TR3000"
 
-# 固件输出目录（相对于 immortalwrt 源码根目录）
-firmware_dir: "bin/targets/mediatek/filogic"
-
 # 自定义软件包列表文件
 packages_list: "packages.yaml"
 
