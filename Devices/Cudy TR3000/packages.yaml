@@ -17,7 +17,6 @@ enable:
   - luci-app-upnp
   - luci-app-wol
   - luci-app-openclash
-  - luci-app-oaf
   - luci-app-harbor-file
   - luci-mod-dashboard
   # - luci-app-argon-config
@@ -36,7 +35,6 @@ enable:
   - kmod-ipt-nat
 
   # 其他工具
-  - wget-nossl
   - wget-ssl
   - libpcre2
 
